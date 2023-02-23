@@ -1,0 +1,118 @@
+export _REGIONSVC="us-east4"
+export _SVC_IMAGE="greet-img"
+export _SVC_IMAGE_VER="1"
+export _SVC_NAME="greet-svc"
+export _DB_INSTANCE_NAME="greetingsql"
+export _DB_IAM_USER="sa-idp"
+export _DB_DATABASE="greeting-db"
+export _SERVERLESS_VPC_CONNECTOR="cymbalconnector"
+export _SA_NAME="sa-idp"
+export _SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+➜  gcloud services enable \
+    sqladmin.googleapis.com \
+    run.googleapis.com \
+    vpcaccess.googleapis.com \
+    servicenetworking.googleapis.com
+
+gcloud compute addresses create google-managed-services-default \
+    --global \
+    --purpose=VPC_PEERING \
+    --prefix-length=20 \
+    --network=projects/$PROJECT_ID/global/networks/default
+
+Existing so get details
+
+➜  cymbal-eats git:(main) gcloud compute addresses list --filter google-managed-services-default
+NAME                             ADDRESS/RANGE    TYPE      PURPOSE      NETWORK  REGION  SUBNET  STATUS
+google-managed-services-default  10.135.128.0/20  INTERNAL  VPC_PEERING  default                  RESERVED
+
+
+
+➜  gcloud sql instances create $DB_INSTANCE_NAME \
+    --project=$PROJECT_ID \
+    --network=projects/$PROJECT_ID/global/networks/default \
+    --no-assign-ip \
+    --database-version=POSTGRES_14 \
+    --cpu=2 \
+    --memory=4GB \
+    --region=$REGION \
+    --root-password=${DB_INSTANCE_PASSWORD}
+Creating Cloud SQL instance for POSTGRES_14...done.
+Created [https://sqladmin.googleapis.com/sql/v1beta4/projects/PROJECT_ID/instances/menu-catalog].
+NAME          DATABASE_VERSION  LOCATION    TIER              PRIMARY_ADDRESS  PRIVATE_ADDRESS  STATUS
+menu-catalog  POSTGRES_14       us-east4-a  db-custom-2-4096  -                10.9.98.34       RUNNABLE
+➜
+
+gcloud sql databases create $DB_DATABASE --instance=$DB_INSTANCE_NAME
+
+gcloud sql users create ${DB_USER} \
+    --password=$DB_PASSWORD \
+    --instance=$DB_INSTANCE_NAME
+
+export DB_INSTANCE_IP=$(gcloud sql instances describe $DB_INSTANCE_NAME \
+    --format=json | jq \
+    --raw-output ".ipAddresses[].ipAddress")
+
+echo $DB_INSTANCE_IP
+
+
+gcloud compute networks vpc-access connectors create ${SERVERLESS_VPC_CONNECTOR} \
+    --region=${REGION} \
+    --range=10.8.0.0/28
+
+Existing
+
+➜  cymbal-eats git:(main) gcloud compute networks vpc-access connectors list --region=$REGION --filter=${SERVERLESS_VPC_CONNECTOR}
+CONNECTOR_ID     REGION    NETWORK  IP_CIDR_RANGE  SUBNET  SUBNET_PROJECT  MACHINE_TYPE  MIN_INSTANCES  MAX_INSTANCES  MIN_THROUGHPUT  MAX_THROUGHPUT  STATE
+cymbalconnector  us-east4  default  10.8.12.0/28                           e2-micro      2              10             200             1000            READY
+
+
+➜  sb-cloud-sql-oauth-int-ip git:(main) ✗ pwd
+~/source/gcp/cloudrun/sb-cloud-sql-oauth-int-ip
+
+(The service account email should be of the form sa-name@projectid.iam - OMITTING the “.gserviceaccount.com” suffix, or it will throw an error)
+gcloud iam service-accounts create ${SA_NAME} \
+    --description="Cloud SQL Service Account GREET" \
+    --display-name="Cloud SQL Service Account GREET"
+➜  echo $SA_NAME
+➜  export SA_EMAIL_SHORT="${SA_NAME}@${PROJECT_ID}.iam"
+➜  echo $SA_EMAIL_SHORT
+➜  export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+➜  echo $SA_EMAIL
+
+
+➜  gcloud sql users create ${SA_EMAIL_SHORT} --instance=${DB_INSTANCE_NAME} --type=cloud_iam_service_account
+
+➜  gcloud sql users list --instance=${DB_INSTANCE_NAME}
+NAME                                     HOST  TYPE                       PASSWORD_POLICY
+greeting-user                                  BUILT_IN
+postgres                                       BUILT_IN
+sa-name@PROJECT_ID.iam                         CLOUD_IAM_SERVICE_ACCOUNT
+
+
+➜  gcloud projects add-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role='roles/cloudsql.instanceUser'
+➜  gcloud projects add-iam-policy-binding ${PROJECT_ID} --member="serviceAccount:${SA_EMAIL}" --role='roles/cloudsql.client'
+
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+ --member="serviceAccount:${_SA_EMAIL}" \
+ --role='roles/logging.logWriter'
+
+
+gcloud builds submit --region=$REGION --tag $REGION-docker.pkg.dev/$PROJECT_ID/quickstart-docker-repo/${_SVC_IMAGE}:latest
+
+gcloud run deploy ${_SVC_NAME} \
+    --image=${_REGIONSVC}-docker.pkg.dev/$PROJECT_ID/quickstart-docker-repo/${_SVC_IMAGE}:latest \
+    --region ${_REGIONSVC} \
+    --allow-unauthenticated \
+    --vpc-connector ${_SERVERLESS_VPC_CONNECTOR} \
+    --service-account "${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --project=$PROJECT_ID \
+    --set-env-vars DB_DATABASE=${_DB_DATABASE} \
+    --set-env-vars DB_HOST="${PROJECT_ID}:${_REGIONSVC}:${_DB_INSTANCE_NAME}" \
+    --set-env-vars DB_IAM_USER=${_DB_IAM_USER}@${PROJECT_ID}.iam
+
+ export _SVC_URL=$(gcloud run services describe ${_SVC_NAME} --platform managed --region ${_REGIONSVC} --format 'value(status.url)')
+
+➜  pyflaskhello git:(main) ✗ curl -X GET  ${_SVC_URL}/postgres  -H "Authorization: bearer $(gcloud auth print-identity-token)"
+Now:2023-02-23 23:28:27.432897+00:00; User: sa-idp@PROJECT_ID.iam; User: sa-idp@PROJECT_ID.iam%
